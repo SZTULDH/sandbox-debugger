@@ -1,0 +1,16 @@
+# 沙盒白名单预装包（可选）
+#
+# 核心调试能力仍为零第三方依赖。以下包仅在需要跑「工程场景」题目
+# （numpy / pandas / yaml 等）时安装进**运行环境**。
+#
+#     pip install -r requirements-sandbox.txt
+#
+# 动态安装（Agent 工具 sandbox_install_packages）默认关闭，
+# 需显式设置：export SANDBOX_ALLOW_PIP=1
+#
+# 完整白名单见 app/sandbox/deps.py :: ALLOWED_PACKAGES
+
+numpy>=1.24
+pandas>=2.0
+PyYAML>=6.0
+python-dateutil>=2.8
