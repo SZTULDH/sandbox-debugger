@@ -37,6 +37,8 @@ run_suite(
 
 ## 调试快速开始
 
+### 函数级（模块级函数）
+
 ```python
 from app.sandbox import debug_api as D
 r = D.start_session(code, "two_sum", [[2, 7, 11, 15], 9])
@@ -45,6 +47,54 @@ D.set_breakpoint(sid, line=6, condition="i == 0 and j == 1")
 ev = D.continue_(sid)["event"]
 D.get_locals(sid)
 D.close_session(sid)
+```
+
+### 类方法（新）
+
+调试入口现在支持三种写法（任选一）：
+
+1. **点号形式**：`entry_point="Class.method"`
+2. **显式字段**：`entry_point="method", class_name="Class"`
+3. **配合构造参数**：`init_args` / `init_kwargs`
+
+```python
+# 方式 1：点号形式
+r = D.start_session(
+    code,
+    "RateLimiter.allow",
+    ["u", 1.0],
+    init_args=[2, 10.0],
+)
+
+# 方式 2：显式 class_name + method
+r = D.start_session(
+    code,
+    "allow",
+    ["u", 1.0],
+    class_name="RateLimiter",
+    init_args=[2, 10.0],
+)
+
+# 一键取证同样支持
+out = D.run_to_error(
+    code,
+    "RateLimiter.allow",
+    ["u", 1.0],
+    init_args=[2, 10.0],
+)
+```
+
+CLI 同样支持：
+
+```bash
+python scripts/sandbox_debug.py \
+  --code-file demo.py \
+  --entry RateLimiter.allow \
+  --init-args 2 10.0 \
+  --args '"u"' 1.0
+
+# 或从题集自动识别 kind=class
+python scripts/sandbox_debug.py --problem examples/class_rate_limiter.json --run --trace 60
 ```
 
 ## 依赖管理
@@ -64,6 +114,7 @@ app/sandbox/
   debugger.py / _dbgharness.py / tracer.py / debug_api.py
   deps.py / mcp_server.py
 docs/problem_schema.md
+docs/sandbox_debug_api.md
 examples/class_rate_limiter.json
 ```
 
