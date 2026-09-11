@@ -11,6 +11,8 @@
 
 所有函数返回**可 JSON 序列化**的 dict，且永远不会抛异常——错误统一放在
 `{"ok": false, "error": "..."}` 里，方便 LLM 直接消费。
+
+依赖相关能力见 `deps.py`，通过本模块的 TOOLS / call_tool 一并暴露。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from . import deps
 from .debugger import DebugSession, DebugError
 
 _LOCK = threading.Lock()
@@ -67,11 +70,22 @@ def start_session(
     trace: bool = True,
     stop_on_entry: bool = True,
     breakpoints: list[dict] | None = None,
+    dependencies: list[str] | None = None,
 ) -> dict:
     """启动调试会话。返回 {"ok": true, "session_id": ..., "entry_stop": {...}}。
 
     stop_on_entry=True 时会停在函数第一行，等效于 IDE 的"停在入口"。
+    若传入 dependencies，会先做白名单预检；缺失且未开启 pip 时直接返回错误。
     """
+    if dependencies:
+        pre = deps.ensure_dependencies(dependencies)
+        if not pre.get("ok"):
+            return {
+                "ok": False,
+                "error": pre.get("error") or "依赖预检失败",
+                "dependencies": pre,
+            }
+
     dbg = DebugSession(code, entry_point, args, budget=budget, max_steps=max_steps,
                        trace=trace, stop_on_entry=stop_on_entry,
                        breakpoints=breakpoints)
@@ -79,7 +93,8 @@ def start_session(
     with _LOCK:
         _SESSIONS[sid] = dbg
     return {"ok": True, "session_id": sid, "entry_stop": dbg.pending,
-            "note": "目标已停在入口" if stop_on_entry else "目标正在运行"}
+            "note": "目标已停在入口" if stop_on_entry else "目标正在运行",
+            "dependencies": deps.check_dependencies(dependencies) if dependencies else None}
 
 
 @_wrap
@@ -216,11 +231,22 @@ def where(session_id: str) -> dict:
 
 @_wrap
 def run_to_error(code: str, entry_point: str, args: list | None = None,
-                 budget: float = 10.0, trace_limit: int = 60) -> dict:
+                 budget: float = 10.0, trace_limit: int = 60,
+                 dependencies: list[str] | None = None) -> dict:
     """一步到位：跑一遍，失败则返回异常栈 + 最后若干步执行轨迹。
 
     这是评估流水线最常用的入口——不用下断点，直接拿到"崩在哪、崩之前发生了什么"。
+    可选 dependencies：启动前做白名单依赖预检 / 受限安装。
     """
+    if dependencies:
+        pre = deps.ensure_dependencies(dependencies)
+        if not pre.get("ok"):
+            return {
+                "ok": False,
+                "error": pre.get("error") or "依赖预检失败",
+                "dependencies": pre,
+            }
+
     with DebugSession(code, entry_point, args, budget=budget,
                       stop_on_entry=False) as dbg:
         ev = dbg.continue_()
@@ -232,6 +258,34 @@ def run_to_error(code: str, entry_point: str, args: list | None = None,
         if ev.get("status") != "returned":
             out["stdout"] = (dbg.output().get("stdout") or "")[-1000:]
         return out
+
+
+# ------------------------------------------------------------------ 依赖（转发）
+
+def list_allowed_packages() -> dict:
+    return deps.list_allowed()
+
+
+def check_dependencies(dependencies: list[str] | None = None) -> dict:
+    return deps.check_dependencies(dependencies)
+
+
+def ensure_dependencies(
+    dependencies: list[str] | None = None,
+    allow_install: bool | None = None,
+    timeout: float = 120.0,
+) -> dict:
+    return deps.ensure_dependencies(
+        dependencies, allow_install=allow_install, timeout=timeout
+    )
+
+
+def install_packages(
+    packages: list[str] | None = None,
+    timeout: float = 120.0,
+    upgrade: bool = False,
+) -> dict:
+    return deps.install_packages(packages, timeout=timeout, upgrade=upgrade)
 
 
 # ------------------------------------------------------------------ 工具清单
@@ -252,6 +306,11 @@ TOOLS: list[dict] = [
                 "stop_on_entry": {"type": "boolean", "description": "是否停在函数第一行"},
                 "breakpoints": {"type": "array", "items": {"type": "object"},
                                 "description": "初始断点 [{line, condition, hit_condition}]"},
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选：题目声明的依赖，启动前白名单预检",
+                },
             },
             "required": ["code", "entry_point"],
         },
@@ -300,12 +359,16 @@ TOOLS: list[dict] = [
      "inputSchema": {"type": "object", "properties": {
          "code": {"type": "string"}, "entry_point": {"type": "string"},
          "args": {"type": "array", "items": {}},
-         "budget": {"type": "number"}, "trace_limit": {"type": "integer"}},
+         "budget": {"type": "number"}, "trace_limit": {"type": "integer"},
+         "dependencies": {"type": "array", "items": {"type": "string"}}},
          "required": ["code", "entry_point"]}},
     {"name": "sandbox_close_session", "description": "关闭调试会话",
      "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string"}},
                     "required": ["session_id"]}},
 ]
+
+# 追加依赖工具（定义在 deps.DEPS_TOOLS）
+TOOLS.extend(deps.DEPS_TOOLS)
 
 _HANDLERS = {
     "sandbox_start_session": start_session,
@@ -321,6 +384,10 @@ _HANDLERS = {
     "sandbox_get_state": get_state,
     "sandbox_run_to_error": run_to_error,
     "sandbox_close_session": close_session,
+    "sandbox_list_allowed_packages": list_allowed_packages,
+    "sandbox_check_dependencies": check_dependencies,
+    "sandbox_ensure_dependencies": ensure_dependencies,
+    "sandbox_install_packages": install_packages,
 }
 
 
