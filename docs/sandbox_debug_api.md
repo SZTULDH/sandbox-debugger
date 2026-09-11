@@ -4,13 +4,32 @@
 表达式求值、执行轨迹回溯。它调试的对象是沙盒里那份**候选代码**——也就是
 Solver 生成的 `candidate.py`。
 
-与"跑一遍测试看红绿"的 `app/sandbox/runner.py` 是互补关系：
+与"跑一遍测试看红绿"的 runner 是互补关系：
 
-| | runner.py | 调试层 |
+| | runner（评测执行） | 调试层（本仓库） |
 |---|---|---|
 | 目的 | 判定对不对（测试通过率） | 回答"为什么错"（定位与取证） |
 | 粒度 | 用例级 | 行级 / 变量级 |
 | 交互 | 一次性 | 可长驻会话、反复探查 |
+
+---
+
+## 0. 能力状态
+
+| 能力 | 状态 | 入口 |
+|------|------|------|
+| 源码级调试（断点/单步/栈/变量/轨迹） | ✅ 已落地 | `debug_api` / MCP / CLI |
+| 一键失败取证 | ✅ 已落地 | `run_to_error` |
+| **预装白名单包** | ✅ 已落地 | `requirements-sandbox.txt`、`deps.ALLOWED_PACKAGES` |
+| **依赖声明 + 预检** | ✅ 已落地 | `check_dependencies`、`dependencies=` 参数 |
+| **受限 pip 工具** | ✅ 已落地 | `install_packages` / `ensure_dependencies`（需 `SANDBOX_ALLOW_PIP=1`） |
+| 每题独立隔离环境（临时 venv / Docker） | ⏳ 未落地 | 当前共用解释器 site-packages |
+
+### 依赖运行模型（✅ 已落地行为）
+
+- 子进程使用**当前解释器**（`python -I`），从该环境的 `site-packages` **按需 import**。
+- **不是**每次隔离重装：预装或受限 pip 装进环境后跨会话复用。
+- 临时目录只放代码与协议文件，不装包。
 
 ---
 
@@ -41,6 +60,17 @@ D.close_session(sid)
 ```python
 out = D.run_to_error(code, "two_sum", [[2, 7, 11, 15], 9])
 # out: status / result / error / traceback / steps / trace_tail / stdout
+```
+
+依赖（✅ 已落地）：
+
+```python
+D.list_allowed_packages()
+D.check_dependencies(["numpy", "pandas"])
+D.ensure_dependencies(["numpy"])            # 跟随 SANDBOX_ALLOW_PIP
+D.install_packages(["numpy==2.0.0"])        # 仅白名单；需显式开 pip
+D.run_to_error(code, entry, args, dependencies=["numpy"])
+D.start_session(code, entry, args, dependencies=["numpy"])
 ```
 
 ### 1.2 CLI（`scripts/sandbox_debug.py`）
@@ -80,36 +110,44 @@ python -m app.sandbox.mcp_server
 ```
 
 实现了 MCP 最小可用子集：`initialize` / `tools/list` / `tools/call` / `ping` / `shutdown`，
-零第三方依赖。工具清单见 `debug_api.TOOLS`，当前 13 个：
+零第三方依赖（核心调试路径）。工具清单见 `debug_api.TOOLS`，当前 **17** 个：
 
-`sandbox_start_session` · `sandbox_set_breakpoint` · `sandbox_continue` ·
+调试（13）：`sandbox_start_session` · `sandbox_set_breakpoint` · `sandbox_continue` ·
 `sandbox_step_over` · `sandbox_step_into` · `sandbox_step_out` · `sandbox_get_stack` ·
 `sandbox_get_locals` · `sandbox_evaluate` · `sandbox_get_trace` · `sandbox_get_state` ·
 `sandbox_run_to_error` · `sandbox_close_session`
+
+依赖（4，✅ 已落地）：`sandbox_list_allowed_packages` · `sandbox_check_dependencies` ·
+`sandbox_ensure_dependencies` · `sandbox_install_packages`
 
 也可以用统一入口调用：
 
 ```python
 D.call_tool("sandbox_run_to_error", {"code": code, "entry_point": "f", "args": [0]})
+D.call_tool("sandbox_check_dependencies", {"dependencies": ["numpy"]})
 ```
 
 ---
 
 ## 2. 能力清单
 
-| 能力 | 接口 | 说明 |
-|---|---|---|
-| 行断点 | `set_breakpoint(line)` | 命中即停 |
-| 条件断点 | `set_breakpoint(line, condition="i > 0")` | 在目标帧内求值 |
-| 命中次数断点 | `set_breakpoint(line, hit_condition=">=3")` | 支持 `>=n` / `==n` / `%n` |
-| 单步 | `step_over` / `step_into` / `step_out` | 按行步进 |
-| 调用栈 | `get_stack(frame=i)` | 只显示候选代码自身的帧 |
-| 变量 | `get_locals(frame=i)` | 值为 `repr` 字符串，截断 200 字符 |
-| 表达式求值 | `evaluate(expr, frame=i)` | 在当前帧求值；也支持 `x = 1` 探查（在副本上跑，不影响真实栈帧） |
-| 执行轨迹 | `get_trace(limit)` | 保留最近 N 步的行号与当时变量，**无需断点**即可事后回溯 |
-| 输出捕获 | `get_output()` | 候选代码的 print 不会污染协议流 |
-| 异常取证 | `run_to_error` | 异常栈 + 崩溃前最后若干步 |
-| 重跑 | `restart(...)` | 可换 code / args / 断点 |
+| 能力 | 接口 | 状态 | 说明 |
+|---|---|---|---|
+| 行断点 | `set_breakpoint(line)` | ✅ | 命中即停 |
+| 条件断点 | `set_breakpoint(line, condition="i > 0")` | ✅ | 在目标帧内求值 |
+| 命中次数断点 | `set_breakpoint(line, hit_condition=">=3")` | ✅ | 支持 `>=n` / `==n` / `%n` |
+| 单步 | `step_over` / `step_into` / `step_out` | ✅ | 按行步进 |
+| 调用栈 | `get_stack(frame=i)` | ✅ | 只显示候选代码自身的帧 |
+| 变量 | `get_locals(frame=i)` | ✅ | 值为 `repr` 字符串，截断 200 字符 |
+| 表达式求值 | `evaluate(expr, frame=i)` | ✅ | 在当前帧求值；语句模式在副本上跑 |
+| 执行轨迹 | `get_trace(limit)` | ✅ | 无需断点即可事后回溯 |
+| 输出捕获 | `get_output()` | ✅ | print 不污染协议流 |
+| 异常取证 | `run_to_error` | ✅ | 异常栈 + 崩溃前最后若干步 |
+| 重跑 | `restart(...)` | ✅ | 可换 code / args / 断点 |
+| 白名单列表 | `list_allowed_packages` | ✅ 已落地 | 见 `deps.ALLOWED_PACKAGES` |
+| 依赖预检 | `check_dependencies` | ✅ 已落地 | 不安装，只检查 |
+| 确保依赖 | `ensure_dependencies` | ✅ 已落地 | 检查 + 可选受限安装 |
+| 受限 pip | `install_packages` | ✅ 已落地 | 需 `SANDBOX_ALLOW_PIP=1` |
 
 ### 护栏（重要）
 
@@ -119,17 +157,19 @@ D.call_tool("sandbox_run_to_error", {"code": code, "entry_point": "f", "args": [
 * **步数护栏** `max_steps`（默认 20 万）：先撞哪个算哪个
 * **进程看门狗** 600s 硬上限
 * 命中护栏返回 `status="aborted"` 并说明原因，不会挂死
+* **依赖**：默认不联网；开启 pip 后仍仅限白名单包名，禁止 URL / git / 本地路径 / 可编辑安装
 
 ---
 
 ## 3. 与过程评估流水线的结合
 
-调试层是 PROPOSAL 里"基于执行轨迹的细粒度错误定位"的落地手段：
+调试层是"基于执行轨迹的细粒度错误定位"的落地手段：
 
-1. `runner.py` 发现对抗测试失败 → 拿到**失败输入**
+1. runner 发现对抗测试失败 → 拿到**失败输入**
 2. `run_to_error(code, entry, 失败输入)` → 得到异常栈或返回值
 3. 若无异常（逻辑错而非崩溃）→ `get_trace()` 回溯最后 N 步，观察变量如何偏离预期
 4. 需要更精细时 → 下条件断点，只在对应用例的输入下停住，逐步观察
+5. 工程题 → 题目声明 `dependencies`，启动前 `check_dependencies` / `ensure_dependencies`
 
 典型场景：`length_of_longest_substring("abba")` 返回 3（应为 2）。
 跑 `--run --trace` 能看到第 8 行 `if ch in seen:` 命中后 `left` 只 +1 而不是收缩到
@@ -169,6 +209,7 @@ D.call_tool("sandbox_run_to_error", {"code": code, "entry_point": "f", "args": [
 * `evaluate` 的语句模式在副本上执行，**不会**真的修改被调程序的变量
 * 沙盒限制是"尽力而为"（禁用 open/eval/exec 与危险模块），**不是安全边界**；
   处理不可信代码仍应在容器内运行
+* 依赖层**不**提供每题独立临时 venv（⏳ 未落地）；安装作用于当前解释器环境
 
 ---
 
@@ -180,4 +221,3 @@ D.call_tool("sandbox_run_to_error", {"code": code, "entry_point": "f", "args": [
    客户端按 UTF-8 解码会抛 `UnicodeDecodeError` 并**打死读线程**，
    表现为莫名其妙的"响应超时"。两边都已加固：子进程 `reconfigure(encoding="utf-8")`，
    客户端 `errors="replace"` + 读线程绝不因单条报文退出。
-   （与 `runner.py` 改用文件传递结果是同一类坑，见 `docs/design.md`）
