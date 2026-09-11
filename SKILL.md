@@ -2,7 +2,8 @@
 name: sandbox-debugger
 description: >-
   对沙盒中运行的 Python 代码进行源码级调试：下断点（支持条件/命中次数）、单步、
-  查看调用栈与局部变量、在当前栈帧求值表达式、无断点事后回溯执行轨迹。
+  查看调用栈与局部变量、在当前栈帧求值表达式、无断点事后回溯执行轨迹；
+  并支持白名单依赖预检与受限 pip（工程场景）。
   当 Agent 或自动化流水线需要把"测试失败"推进到"定位到具体哪一行、哪个变量出错"
   时使用——尤其是调试 LLM 生成的代码、定位伪正确样本的逻辑缺陷。
 ---
@@ -16,11 +17,23 @@ description: >-
 
 能力边界：仅支持 Python；只跟踪候选代码自身的帧，不进入标准库/第三方库内部。
 
+## 能力状态
+
+| 能力 | 状态 |
+|------|------|
+| 断点 / 单步 / 栈 / 变量 / 轨迹 | ✅ 已落地 |
+| `run_to_error` 一键取证 | ✅ 已落地 |
+| 预装白名单包 | ✅ 已落地 |
+| 依赖声明 + 预检 | ✅ 已落地 |
+| 受限 pip（`SANDBOX_ALLOW_PIP`） | ✅ 已落地 |
+| 每题独立临时环境 | ⏳ 未落地（当前共用解释器环境） |
+
 ## 何时使用
 
 - 候选代码在公开测试通过、对抗测试失败，需要找出**具体出错行与变量**
 - 需要观察某个边界输入下变量如何偏离预期
 - 复现并取证一个崩溃（异常栈 + 崩溃前最后若干步轨迹）
+- 工程题需要 `numpy` / `pandas` 等：先预检依赖，再调试
 
 ## 如何接入（三种方式）
 
@@ -44,10 +57,15 @@ python -m app.sandbox.mcp_server
 }
 ```
 
-工具清单（13 个）：`sandbox_start_session` / `sandbox_set_breakpoint` /
+工具清单（**17** 个）：
+
+调试：`sandbox_start_session` / `sandbox_set_breakpoint` /
 `sandbox_continue` / `sandbox_step_over` / `sandbox_step_into` / `sandbox_step_out` /
 `sandbox_get_stack` / `sandbox_get_locals` / `sandbox_evaluate` / `sandbox_get_trace` /
 `sandbox_get_state` / `sandbox_run_to_error` / `sandbox_close_session`
+
+依赖（✅ 已落地）：`sandbox_list_allowed_packages` / `sandbox_check_dependencies` /
+`sandbox_ensure_dependencies` / `sandbox_install_packages`
 
 ### B. Python API（`app/sandbox/debug_api.py`）
 
@@ -72,6 +90,14 @@ out = D.run_to_error(code, "two_sum", [[2, 7, 11, 15], 9])
 # out: status / result / error / traceback / steps / trace_tail / stdout
 ```
 
+依赖预检 / 受限安装：
+
+```python
+D.check_dependencies(["numpy"])
+D.ensure_dependencies(["numpy"])   # 需 SANDBOX_ALLOW_PIP=1 才会真正安装
+D.run_to_error(code, entry, args, dependencies=["numpy"])
+```
+
 ### C. CLI（`scripts/sandbox_debug.py`）
 
 ```bash
@@ -81,6 +107,12 @@ python scripts/sandbox_debug.py --problem datasets/code/x.json --run --trace 60
 
 REPL 命令：`b <行> [条件]` · `c/n/s/r`（继续/跳过/进入/跳出）· `p <表达式>` ·
 `l`（变量）· `bt`（栈）· `t [n]`（轨迹）· `o`（输出）· `q`（退出）。
+
+## 依赖运行模型
+
+- **按需 import**，共用当前解释器 `site-packages`，不是每次隔离重装。
+- 预装：`pip install -r requirements-sandbox.txt`。
+- 受限 pip 装进环境后跨会话复用；默认关闭（`SANDBOX_ALLOW_PIP=1` 开启）。
 
 ## 典型用法示例
 
@@ -101,6 +133,7 @@ out = D.run_to_error(code, entry, args)
 - **步数护栏** `max_steps`：先撞哪个算哪个
 - **进程看门狗** 600s 硬上限
 - 命中护栏返回 `status="aborted"`，不会挂死
+- 依赖安装：默认不联网；开启后仅白名单包名，禁止 URL/git/本地路径
 
 ## 限制
 
