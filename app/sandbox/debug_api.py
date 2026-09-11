@@ -71,11 +71,20 @@ def start_session(
     stop_on_entry: bool = True,
     breakpoints: list[dict] | None = None,
     dependencies: list[str] | None = None,
+    class_name: str | None = None,
+    init_args: list | None = None,
+    init_kwargs: dict | None = None,
+    method: str | None = None,
 ) -> dict:
     """启动调试会话。返回 {"ok": true, "session_id": ..., "entry_stop": {...}}。
 
     stop_on_entry=True 时会停在函数第一行，等效于 IDE 的"停在入口"。
     若传入 dependencies，会先做白名单预检；缺失且未开启 pip 时直接返回错误。
+
+    调试类方法有三种写法（任选其一）：
+      * ``entry_point="Class.method"``          —— 点号形式
+      * ``entry_point="method", class_name="Class"``
+      * 再配 ``init_args`` / ``init_kwargs`` 传入构造参数
     """
     if dependencies:
         pre = deps.ensure_dependencies(dependencies)
@@ -86,7 +95,10 @@ def start_session(
                 "dependencies": pre,
             }
 
-    dbg = DebugSession(code, entry_point, args, budget=budget, max_steps=max_steps,
+    dbg = DebugSession(code, entry_point, args,
+                       class_name=class_name, init_args=init_args,
+                       init_kwargs=init_kwargs, method=method,
+                       budget=budget, max_steps=max_steps,
                        trace=trace, stop_on_entry=stop_on_entry,
                        breakpoints=breakpoints)
     sid = _new_id()
@@ -232,11 +244,19 @@ def where(session_id: str) -> dict:
 @_wrap
 def run_to_error(code: str, entry_point: str, args: list | None = None,
                  budget: float = 10.0, trace_limit: int = 60,
-                 dependencies: list[str] | None = None) -> dict:
+                 dependencies: list[str] | None = None,
+                 class_name: str | None = None,
+                 init_args: list | None = None,
+                 init_kwargs: dict | None = None,
+                 method: str | None = None,
+                 kwargs: dict | None = None) -> dict:
     """一步到位：跑一遍，失败则返回异常栈 + 最后若干步执行轨迹。
 
     这是评估流水线最常用的入口——不用下断点，直接拿到"崩在哪、崩之前发生了什么"。
     可选 dependencies：启动前做白名单依赖预检 / 受限安装。
+
+    类级目标同样支持 ``Class.method`` 点号写法或 ``class_name`` + ``method`` 字段；
+    ``init_args`` / ``init_kwargs`` 用于构造实例，``kwargs`` 传给被调方法。
     """
     if dependencies:
         pre = deps.ensure_dependencies(dependencies)
@@ -247,8 +267,10 @@ def run_to_error(code: str, entry_point: str, args: list | None = None,
                 "dependencies": pre,
             }
 
-    with DebugSession(code, entry_point, args, budget=budget,
-                      stop_on_entry=False) as dbg:
+    with DebugSession(code, entry_point, args, kwargs,
+                      class_name=class_name, init_args=init_args,
+                      init_kwargs=init_kwargs, method=method,
+                      budget=budget, stop_on_entry=False) as dbg:
         ev = dbg.continue_()
         out = {"ok": True, "status": ev.get("status"), "result": ev.get("result"),
                "error": ev.get("error"), "traceback": ev.get("traceback"),
@@ -304,6 +326,19 @@ TOOLS: list[dict] = [
                 "args": {"type": "array", "items": {}, "description": "入口函数的位置参数"},
                 "budget": {"type": "number", "description": "纯运行时间预算（秒），默认 10"},
                 "stop_on_entry": {"type": "boolean", "description": "是否停在函数第一行"},
+                "class_name": {
+                    "type": "string",
+                    "description": "类级调试：类名（entry_point 为方法名时使用）",
+                },
+                "method": {"type": "string", "description": "类级调试：要调试的方法名"},
+                "init_args": {
+                    "type": "array", "items": {},
+                    "description": "类级调试：构造实例的位置参数",
+                },
+                "init_kwargs": {
+                    "type": "object",
+                    "description": "类级调试：构造实例的关键字参数",
+                },
                 "breakpoints": {"type": "array", "items": {"type": "object"},
                                 "description": "初始断点 [{line, condition, hit_condition}]"},
                 "dependencies": {
@@ -360,7 +395,13 @@ TOOLS: list[dict] = [
          "code": {"type": "string"}, "entry_point": {"type": "string"},
          "args": {"type": "array", "items": {}},
          "budget": {"type": "number"}, "trace_limit": {"type": "integer"},
-         "dependencies": {"type": "array", "items": {"type": "string"}}},
+         "dependencies": {"type": "array", "items": {"type": "string"}},
+         "class_name": {"type": "string", "description": "类级调试：类名"},
+         "method": {"type": "string", "description": "类级调试：方法名"},
+         "init_args": {"type": "array", "items": {},
+                       "description": "类级调试：构造参数"},
+         "init_kwargs": {"type": "object", "description": "类级调试：构造关键字参数"},
+         "kwargs": {"type": "object", "description": "传给被调方法的关键字参数"}},
          "required": ["code", "entry_point"]}},
     {"name": "sandbox_close_session", "description": "关闭调试会话",
      "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string"}},

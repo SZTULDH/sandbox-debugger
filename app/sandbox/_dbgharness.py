@@ -128,6 +128,88 @@ def _hit_ok(hit_condition: str | None, hit_count: int) -> bool:
     return True
 
 
+# ------------------------------------------------------------------ 入口解析
+
+
+def resolve_target(
+    ns: dict,
+    entry: str,
+    class_name: str | None = None,
+    init_args: list | None = None,
+    init_kwargs: dict | None = None,
+    method: str | None = None,
+) -> tuple[object | None, str, dict | None]:
+    """把「入口」解析成可直接调用的对象。
+
+    支持三种写法：
+
+    * ``func``                     —— 模块级函数（原有行为）
+    * ``Class.method``             —— 点号形式，自动构造实例后绑定方法
+    * ``class_name`` + ``entry_point``（entry 即方法名）—— 显式字段形式
+
+    返回 ``(callable, 展示用标签, 错误 dict)``；成功时错误为 None。
+    构造失败按 runtime_error 返回，未找到类 / 方法按 missing_entry 返回。
+    """
+    init_args = list(init_args or [])
+    init_kwargs = dict(init_kwargs or {})
+
+    cname = class_name
+    mname = method
+    dot_cls, _, dot_m = (entry or "").partition(".")
+    if dot_m:
+        # entry 写成了 "Class.method"
+        if not cname:
+            cname, mname = dot_cls, (mname or dot_m)
+        elif not mname:
+            # 类名已由 class_name 字段给出，点号后半段仍是方法名
+            mname = dot_m
+
+    if not cname:
+        fn = ns.get(entry)
+        if not callable(fn):
+            return None, entry, {
+                "status": "missing_entry",
+                "error": f"未找到入口函数 `{entry}`",
+            }
+        return fn, entry, None
+
+    cls = ns.get(cname)
+    if not isinstance(cls, type):
+        return None, entry, {
+            "status": "missing_entry",
+            "error": f"未找到类 `{cname}`",
+        }
+
+    try:
+        instance = cls(*init_args, **init_kwargs)
+    except BaseException as exc:  # noqa: BLE001
+        return None, entry, {
+            "status": "runtime_error",
+            "error_type": type(exc).__name__,
+            "error": f"构造 `{cname}` 失败: {exc}"[:500],
+            "traceback": traceback.format_exc()[-1500:],
+        }
+
+    # 类级情况下 entry_point 约定的就是「默认方法名」（与题集 JSON 一致），
+    # 因此 method 未显式给出时回落到 entry；entry 退化成类名本身则视为未指定。
+    mname = mname or entry or ""
+    if mname == cname:
+        mname = ""
+    if not mname:
+        return None, entry, {
+            "status": "missing_entry",
+            "error": f"类 `{cname}` 未指定要调试的方法（entry_point 或 method）",
+        }
+    fn = getattr(instance, mname, None)
+    if not callable(fn):
+        return None, entry, {
+            "status": "missing_entry",
+            "error": f"类 `{cname}` 上未找到方法 `{mname}`",
+        }
+    # 绑定方法自身持有实例引用，实例不会被提前回收
+    return fn, f"{cname}.{mname}", None
+
+
 # ------------------------------------------------------------------ 会话
 
 
@@ -139,6 +221,12 @@ class DebugSession:
         self.target_file: str | None = None
         self.ns: dict | None = None
         self.entry: str | None = None
+        self.entry_label: str = ""
+        self.target = None
+        self.class_name: str | None = None
+        self.method: str | None = None
+        self.init_args: list = []
+        self.init_kwargs: dict = {}
         self.args: list = []
         self.kwargs: dict = {}
         self.out_writer: T._LimitedWriter | None = None
@@ -202,6 +290,10 @@ class DebugSession:
             fh.write(code)
 
         self.entry = entry
+        self.class_name = args.get("class_name") or None
+        self.method = args.get("method") or None
+        self.init_args = list(args.get("init_args") or [])
+        self.init_kwargs = dict(args.get("init_kwargs") or {})
         self.args = args.get("args") or []
         self.kwargs = args.get("kwargs") or {}
         self.max_steps = int(args.get("max_steps", 200_000))
@@ -230,9 +322,18 @@ class DebugSession:
                 "traceback": traceback.format_exc()[-1500:],
             }
 
-        if entry not in ns:
-            return {"loaded": False, "status": "missing_entry",
-                    "error": f"未找到入口函数 `{entry}`"}
+        target, label, err = resolve_target(
+            ns,
+            entry,
+            args.get("class_name"),
+            args.get("init_args"),
+            args.get("init_kwargs"),
+            args.get("method"),
+        )
+        if err is not None:
+            return {"loaded": False, **err}
+        self.target = target
+        self.entry_label = label
 
         self.finished = False
         self.status = "idle"
@@ -257,6 +358,7 @@ class DebugSession:
         return {
             "loaded": True,
             "entry": entry,
+            "entry_label": self.entry_label,
             "file": self.target_file,
             "breakpoints": [b.to_dict() for b in self.breakpoints],
         }
@@ -265,7 +367,7 @@ class DebugSession:
         sys.settrace(self._dispatch)
         try:
             with redirect_stdout(self.out_writer), redirect_stderr(self.err_writer):
-                fn = self.ns[self.entry]
+                fn = self.target
                 self.result = fn(*self.args, **self.kwargs)
             self.status = "returned"
         except Abort as exc:
@@ -472,6 +574,10 @@ class DebugSession:
         merged = {
             "code": open(self.target_file, encoding="utf-8").read() if self.target_file else "",
             "entry_point": self.entry,
+            "class_name": self.class_name,
+            "method": self.method,
+            "init_args": self.init_args,
+            "init_kwargs": self.init_kwargs,
             "args": self.args,
             "kwargs": self.kwargs,
             "budget": self.budget,

@@ -40,8 +40,13 @@ from app.sandbox.debug_api import (  # noqa: E402
 _CODE_FENCE = re.compile(r"```(?:python)?\s*(.*?)```", re.S)
 
 
-def load_problem(path: Path) -> tuple[str, str, list]:
-    """从题集 JSON 取出 (代码, 入口函数, 默认入参)。"""
+def load_problem(path: Path) -> tuple[str, str, list, dict | None]:
+    """从题集 JSON 取出 (代码, 入口, 默认入参, 类级信息)。
+
+    ``kind == "class"`` 时：入口即默认方法名，默认入参取该用例的 method args，
+    另外返回 ``{class_name, init_args, init_kwargs}`` 供构造实例使用。
+    函数级题目第四个返回值恒为 None。
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     sol = data.get("mock_solution") or {}
     raw = sol.get("代码实现", "")
@@ -50,7 +55,15 @@ def load_problem(path: Path) -> tuple[str, str, list]:
     entry = data.get("entry_point")
     first = (data.get("public_tests") or [{}])[0]
     args = first.get("args", [])
-    return code, entry, args
+
+    cls = None
+    if (data.get("kind") or "function").lower() == "class":
+        cls = {
+            "class_name": data.get("class_name") or entry,
+            "init_args": data.get("init_args") or [],
+            "init_kwargs": data.get("init_kwargs") or {},
+        }
+    return code, entry, args, cls
 
 
 def parse_args_tokens(tokens: list[str]):
@@ -145,7 +158,10 @@ def main() -> int:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--code-file", help="包含待调试代码的 .py 文件")
     src.add_argument("--problem", help="题集 JSON，调试其中的 mock 解答")
-    ap.add_argument("--entry", help="入口函数名")
+    ap.add_argument("--entry", help="入口函数名；类级时写 'Class.method' 或方法名")
+    ap.add_argument("--class-name", help="类级调试：类名")
+    ap.add_argument("--init-args", nargs="*", default=[],
+                    help="类级调试：构造实例的位置参数（JSON 字面量）")
     ap.add_argument("--args", nargs="*", default=[], help="入口函数入参（JSON 字面量）")
     ap.add_argument("--budget", type=float, default=10.0, help="运行时间预算（秒）")
     ap.add_argument("--run", action="store_true", help="一次性跑到底，不进 REPL")
@@ -156,10 +172,25 @@ def main() -> int:
         code = Path(ns.code_file).read_text(encoding="utf-8")
         entry = ns.entry
         args = parse_args_tokens(ns.args)
+        cls = None
     else:
-        code, entry, args = load_problem(Path(ns.problem))
+        code, entry, args, cls = load_problem(Path(ns.problem))
         if ns.args:
             args = parse_args_tokens(ns.args)
+
+    # 命令行显式给了类名/构造参数时以命令行为准
+    if ns.class_name:
+        cls = dict(cls or {})
+        cls["class_name"] = ns.class_name
+    if ns.init_args:
+        cls = dict(cls or {})
+        cls["init_args"] = parse_args_tokens(ns.init_args)
+
+    class_kw = {
+        "class_name": (cls or {}).get("class_name"),
+        "init_args": (cls or {}).get("init_args"),
+        "init_kwargs": (cls or {}).get("init_kwargs"),
+    }
 
     if not entry:
         print("缺少 --entry（或从题集推断失败）", file=sys.stderr)
@@ -167,11 +198,12 @@ def main() -> int:
 
     if ns.run:
         out = run_to_error(code, entry, args, budget=ns.budget,
-                           trace_limit=ns.trace or 60)
+                           trace_limit=ns.trace or 60, **class_kw)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0 if out.get("status") == "returned" else 1
 
-    r = start_session(code, entry, args, budget=ns.budget, stop_on_entry=True)
+    r = start_session(code, entry, args, budget=ns.budget, stop_on_entry=True,
+                      **class_kw)
     if not r.get("ok"):
         print(f"启动失败: {r.get('error')}", file=sys.stderr)
         return 2

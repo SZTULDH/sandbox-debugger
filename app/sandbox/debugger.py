@@ -72,6 +72,10 @@ class DebugSession:
         args: list | None = None,
         kwargs: dict | None = None,
         *,
+        class_name: str | None = None,
+        init_args: list | None = None,
+        init_kwargs: dict | None = None,
+        method: str | None = None,
         budget: float = 10.0,
         max_steps: int = 200_000,
         trace: bool = True,
@@ -108,9 +112,12 @@ class DebugSession:
         threading.Thread(target=self._read_stderr, daemon=True).start()
 
         if code is not None:
-            self.load(code, entry_point, args, kwargs, budget=budget,
-                      max_steps=max_steps, trace=trace, trace_limit=trace_limit,
-                      stop_on_entry=stop_on_entry, breakpoints=breakpoints)
+            self.load(code, entry_point, args, kwargs,
+                      class_name=class_name, init_args=init_args,
+                      init_kwargs=init_kwargs, method=method,
+                      budget=budget, max_steps=max_steps, trace=trace,
+                      trace_limit=trace_limit, stop_on_entry=stop_on_entry,
+                      breakpoints=breakpoints)
 
     # -------------------------------------------------------------- IO
 
@@ -212,6 +219,10 @@ class DebugSession:
         args: list | None = None,
         kwargs: dict | None = None,
         *,
+        class_name: str | None = None,
+        init_args: list | None = None,
+        init_kwargs: dict | None = None,
+        method: str | None = None,
         budget: float = 10.0,
         max_steps: int = 200_000,
         trace: bool = True,
@@ -223,6 +234,10 @@ class DebugSession:
         res = self._cmd("load", {
             "code": code,
             "entry_point": entry_point,
+            "class_name": class_name,
+            "init_args": list(init_args or []),
+            "init_kwargs": dict(init_kwargs or {}),
+            "method": method,
             "args": args or [],
             "kwargs": kwargs or {},
             "budget": budget,
@@ -387,6 +402,10 @@ def debug_once(
     entry_point: str,
     args: list | None = None,
     *,
+    class_name: str | None = None,
+    init_args: list | None = None,
+    init_kwargs: dict | None = None,
+    method: str | None = None,
     breakpoints: list[dict] | None = None,
     budget: float = 10.0,
     max_steps: int = 200_000,
@@ -398,7 +417,9 @@ def debug_once(
     适合自动化流水线（不给 Agent 交互机会，直接产出结构化报告）。
     """
     stops: list[dict] = []
-    with DebugSession(code, entry_point, args, budget=budget, max_steps=max_steps,
+    with DebugSession(code, entry_point, args, class_name=class_name,
+                      init_args=init_args, init_kwargs=init_kwargs,
+                      method=method, budget=budget, max_steps=max_steps,
                       stop_on_entry=False, breakpoints=breakpoints) as dbg:
         # load 已经等到了第一个事件：有断点时是首个停靠点，无断点时是退出事件
         ev = dbg.first_event() or {}
